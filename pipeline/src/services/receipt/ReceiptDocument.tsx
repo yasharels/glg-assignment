@@ -59,6 +59,10 @@ const styles = StyleSheet.create({
 });
 
 export const ReceiptDocument: React.FC<{ order: Order }> = ({ order }) => {
+  // Derive the total from the line items rather than trusting order.amount, which is
+  // supplied by the API caller and bears no relation to the items generated at intake.
+  const totalAmount = order.details?.items.reduce((total, item) => total + item.price * item.quantity, 0) ?? 0;
+
   return (
     <Document>
       <Page style={styles.page}>
@@ -88,7 +92,7 @@ export const ReceiptDocument: React.FC<{ order: Order }> = ({ order }) => {
         <View style={styles.tableHeader}>
           <Text style={styles.itemName}>Item</Text>
           <Text style={styles.itemQuantity}>Quantity</Text>
-          <Text style={styles.itemPrice}>Price</Text>
+          <Text style={styles.itemPrice}>Unit Price</Text>
         </View>
 
         {/* Items */}
@@ -103,7 +107,7 @@ export const ReceiptDocument: React.FC<{ order: Order }> = ({ order }) => {
         {/* Total Amount */}
         <View style={styles.total}>
           <Text style={styles.totalLabel}>Total Amount:</Text>
-          <Text>${order.amount.toFixed(2)}</Text>
+          <Text>${totalAmount.toFixed(2)}</Text>
         </View>
       </Page>
     </Document>
