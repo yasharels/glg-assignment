@@ -173,5 +173,5 @@ Each step is independently reviewable and leaves the tree in a coherent state.
 - [✓] **Step 9 — Verify end to end.**
       Rebuild (the new queue has to exist in ElasticMQ), then: create an order and cancel it immediately, before intake — expect no email, a logged warning, and status `cancelled`; create one, let it get details, then cancel — expect a cancellation email in Mailhog and *no* receipt email; cancel a completed order — expect `409`; cancel twice — expect `409` and exactly one email; cancel a nonexistent id — expect `404`. Confirm nothing piles up in the DLQ.
 
-- [✓] **Step 10 — Document.**
+- [ ] **Step 10 — Document.**
       Add a task 4 entry to `NOTES.md` covering the soft-cancel decision, the dedicated queue, the concurrency guard, and the known limitations; update the README's architecture and features sections to describe the cancellation stage.

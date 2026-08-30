@@ -23,3 +23,83 @@
    renderer would just directly use that data. I chose not to go with that more involved
    approach since as noted above, this project generates random items data, and 
    doesn't actually have price data to look up.
+3. Task 4 asked for a `DELETE` endpoint that cancels an order and sends a cancellation email.
+   Note that a `DELETE /api/orders` already existed: it hard-deleted the Dynamo row, took
+   `orderId` in the request body, and sent no email. So this was a rework, not a new endpoint.
+
+   Cancel is a status transition, not a deletion. You cannot email a customer about an order
+   you just erased, you lose the ability to answer "what happened to order X?", and - most
+   practically - every pipeline worker already begins with
+   `if (order.status !== OrderStatus.PROCESSING) { warn; return; }`. Leaving the row in place
+   and flipping its status to `cancelled` means every in-flight stage stops on its own, returns
+   normally, and lets `QueueInstance` delete the message. Deleting the row instead would make
+   those same workers throw `Order not found`, retry three times, and dead-letter - turning a
+   normal user action into noise. The enum already had `CANCELLED` on the app side, which
+   suggests this was the intended reading; the pipeline's copy was missing it, so I added it.
+
+   I also moved the route to `DELETE /api/orders/:orderId`. Bodies on `DELETE` have no defined
+   HTTP semantics, are dropped by some proxies, and are unsupported by some clients; a path
+   param also matches the neighbouring `GET /api/orders/{orderId}`.
+
+   The email goes out through a new `order-cancellation-queue` consumed by a new
+   `OrderCancellationInstance` (`INSTANCE_TYPE=order-canceller`), rather than from the
+   controller directly. That keeps the endpoint's latency off SMTP and gives cancellation
+   emails the same retry-and-dead-letter behaviour every other stage has. I considered reusing
+   `order-email-queue` with a `type` message attribute instead, but `OrderEmailerInstance`'s
+   whole body assumes a `processing` order with a receipt on disk - the two paths have opposite
+   preconditions, so every consumer would have had to branch on message type. A separate queue
+   keeps each worker single-purpose for the same five wiring touch points (queue config, env
+   var, `InstanceType`, registry, compose service) every other stage already costs.
+
+   The concurrency guard is the part worth reviewing closely. `OrdersDatabase.cancelOrder`
+   issues a conditional `UpdateItem` (`ConditionExpression: "#status = :processing"`), and
+   *only the request whose write succeeds* enqueues the email. Two simultaneous `DELETE`s both
+   reach the write; exactly one wins, so exactly one email is sent. There is deliberately no
+   second status check in the controller - any decision made from a prior read is already stale
+   by the time the write lands, and having two guards invites someone to later "clean up" the
+   one that actually matters.
+
+   One thing end-to-end testing caught that I had not anticipated: rendering a PDF takes long
+   enough that an order can be cancelled *while the processor is mid-render*. The processor had
+   already passed its status check, so it would finish, write the file, and set
+   `receiptFilePath` - after the cancellation worker had already run and found nothing to clean
+   up. The emailer then correctly refused to send, and the PDF was orphaned on disk forever.
+   The fix is `OrdersDatabase.updateIfStatus`: the processor now *claims* its receipt
+   conditionally, and unlinks the file if the order has left `PROCESSING`. Combined with the
+   cancellation worker unlinking any `receiptFilePath` it does find, both orderings are covered,
+   since any successful claim must have happened before the cancellation.
+
+   Incidental bugs found and fixed along the way, because task 4 depends on them:
+   - `getOrderStatus` used `forEach` with a `return` inside the callback, so it always returned
+     `undefined` and `GET /api/orders?status=...` silently ignored the filter. Replaced with
+     `.find()`. Fixed in both the app and pipeline copies to stop the two drifting again.
+   - `getOrders` built `#userId` / `#status` / `#referenceId` placeholders into its
+     `FilterExpression` but never populated `ExpressionAttributeNames`, so any filter that
+     actually got applied threw a `ValidationException`. `?userId=` was already returning a 500
+     on `main`; fixing `getOrderStatus` alone would have done the same to `?status=`.
+
+   Caveats:
+   - An order cancelled before the intake worker runs has no `order.details` yet, so there is
+     no customer address to email. The worker logs a warning and skips the send; the
+     cancellation itself still succeeds. This is really a data-model problem: customer contact
+     details are randomly generated at intake rather than supplied by the client, so they
+     genuinely do not exist yet. The same fix I described in note 2 - have the client supply
+     what it knows at creation - would resolve this too.
+   - If the SQS send fails after the status has already flipped, the order is correctly
+     `cancelled` but no email goes out, and the caller sees a 500. Doing this properly needs a
+     transactional outbox, or a sweeper over `cancelled` orders with no cancellation email
+     recorded. I did not build either; it is a lot of machinery for this exercise.
+   - Delivery is at-least-once, so a redelivered message can produce a duplicate cancellation
+     email. The existing receipt emailer makes exactly the same trade-off, and diverging from
+     that here did not seem worth it.
+   - Only `processing` orders are cancellable. `completed` ones have already had a receipt
+     emailed, so cancelling one is really a refund - a different business process. `error`
+     orders need operator triage, and silently letting a customer cancel one would mask the
+     underlying failure. Both return a 409 carrying the current status, so a caller always
+     knows which case they hit.
+   - There is no test framework in this repo, so everything above was verified by hand against
+     the running stack: curl for the API, Mailhog's HTTP API for the emails, worker logs for
+     the branch decisions, and the SQS query API for queue and dead-letter depths. The one
+     branch I could not trigger from outside is the processor's discard path - the render
+     window is roughly 100ms - so that one is covered by calling `updateIfStatus` directly
+     against a cancelled order rather than by observing it fire.
