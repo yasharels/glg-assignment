@@ -155,7 +155,7 @@ Each step is independently reviewable and leaves the tree in a coherent state.
 - [✓] **Step 3 — Register the new instance type.**
       Add `ORDER_CANCELLER = "order-canceller"` to `InstanceType`, register `OrderCancellationInstance.prototype` in `InstanceManager.getRegistry()`, and add the `order-canceller` service to `docker-compose.yml` — including the `./tmp:/otmp` volume, since the worker cleans up receipt files.
 
-- [ ] **Step 4 — Add `EmailService.sendCancellationEmail`.**
+- [✓] **Step 4 — Add `EmailService.sendCancellationEmail`.**
       A sibling of `sendEmail`: same transport and `from`, no PDF attachment, subject and body appropriate to a cancellation.
 
 - [ ] **Step 5 — Write `OrderCancellationInstance`.**
