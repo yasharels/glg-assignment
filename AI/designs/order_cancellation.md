@@ -152,7 +152,7 @@ Each step is independently reviewable and leaves the tree in a coherent state.
 - [✓] **Step 2 — Provision the cancellation queue.**
       Add `order-cancellation-queue` to `elasticmq.conf`, mirroring the other queues including the `deadLettersQueue` block, and add `SQS_ORDER_CANCELLATION_QUEUE_NAME` to `etc/dev.env`.
 
-- [ ] **Step 3 — Register the new instance type.**
+- [✓] **Step 3 — Register the new instance type.**
       Add `ORDER_CANCELLER = "order-canceller"` to `InstanceType`, register `OrderCancellationInstance.prototype` in `InstanceManager.getRegistry()`, and add the `order-canceller` service to `docker-compose.yml` — including the `./tmp:/otmp` volume, since the worker cleans up receipt files.
 
 - [ ] **Step 4 — Add `EmailService.sendCancellationEmail`.**
