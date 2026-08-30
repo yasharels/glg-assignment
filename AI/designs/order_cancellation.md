@@ -158,7 +158,7 @@ Each step is independently reviewable and leaves the tree in a coherent state.
 - [✓] **Step 4 — Add `EmailService.sendCancellationEmail`.**
       A sibling of `sendEmail`: same transport and `from`, no PDF attachment, subject and body appropriate to a cancellation.
 
-- [ ] **Step 5 — Write `OrderCancellationInstance`.**
+- [✓] **Step 5 — Write `OrderCancellationInstance`.**
       Consumes `{ orderId }`; guards on `status === CANCELLED` (the mirror image of the other workers' guard, so a stale or redelivered message is a safe no-op); skips with a warning when `details` is absent; sends the email; unlinks `receiptFilePath` if present, tolerating `ENOENT`.
 
 - [ ] **Step 6 — Add the conditional cancel to the app's `OrdersDatabase`.**
