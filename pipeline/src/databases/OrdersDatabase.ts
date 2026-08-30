@@ -1,5 +1,6 @@
 import {
   AttributeValue,
+  ConditionalCheckFailedException,
   GetItemCommand,
   UpdateItemCommand
 } from "@aws-sdk/client-dynamodb";
@@ -7,6 +8,7 @@ import {
 import { unmarshall, marshall } from "@aws-sdk/util-dynamodb";
 
 import { MutableOrderFields, Order } from "../definitions/entities/Order";
+import { OrderStatus } from "../definitions/enums/OrderStatus";
 import { DynamoService } from "../services/dynamo/DynamoService";
 import { QueryCommand } from "@aws-sdk/lib-dynamodb";
 
@@ -15,6 +17,7 @@ interface DynamoUpdateParams {
   ExpressionAttributeValues: {
     [key: string]: AttributeValue;
   };
+  ConditionExpression?: string;
   ExpressionAttributeNames?: {
     [key: string]: string;
   };
@@ -57,7 +60,7 @@ export class OrdersDatabase {
     return response.Items[0] as Order;
   }
 
-  public static async update(orderId: string, mutableFields: MutableOrderFields): Promise<void> {
+  private static buildUpdateParams(mutableFields: MutableOrderFields): DynamoUpdateParams {
     const { status } = mutableFields;
 
     const params: DynamoUpdateParams = {
@@ -82,6 +85,10 @@ export class OrdersDatabase {
       params.ExpressionAttributeNames!["#status"] = "status";
     }
 
+    return params;
+  }
+
+  private static async sendUpdate(orderId: string, params: DynamoUpdateParams): Promise<void> {
     /* If unused, remove because dynamo won't allow this to be empty */
     if (params.ExpressionAttributeNames && Object.keys(params.ExpressionAttributeNames).length === 0) {
       delete params.ExpressionAttributeNames;
@@ -95,5 +102,36 @@ export class OrdersDatabase {
 
     const dynamo = DynamoService.getClient();
     await dynamo.send(command);
+  }
+
+  public static async update(orderId: string, mutableFields: MutableOrderFields): Promise<void> {
+    await this.sendUpdate(orderId, this.buildUpdateParams(mutableFields));
+  }
+
+  /**
+   * Apply mutable fields, but only while the order is still in expectedStatus.
+   *
+   * Returns false when the order has already moved on, so a caller that has produced a
+   * side effect - a rendered receipt, say - can undo it instead of orphaning it.
+   */
+  public static async updateIfStatus(
+    orderId: string,
+    expectedStatus: OrderStatus,
+    mutableFields: MutableOrderFields
+  ): Promise<boolean> {
+    const params = this.buildUpdateParams(mutableFields);
+
+    params.ConditionExpression = "#status = :expectedStatus";
+    params.ExpressionAttributeValues[":expectedStatus"] = { S: expectedStatus };
+    params.ExpressionAttributeNames!["#status"] = "status";
+
+    try {
+      await this.sendUpdate(orderId, params);
+      return true;
+    }
+    catch (error: any) {
+      if (error instanceof ConditionalCheckFailedException) return false;
+      throw error;
+    }
   }
 }

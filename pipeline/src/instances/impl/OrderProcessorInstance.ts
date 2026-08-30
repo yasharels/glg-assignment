@@ -43,7 +43,20 @@ export class OrderProcessorInstance extends QueueInstance<OrderMessage> {
     await fs.writeFile(filePath, buffer);
     this.logger.info(`Receipt saved: ${filePath}`);
 
-    await OrdersDatabase.update(order.orderId, { receiptFilePath: filePath });
+    /**
+     * Rendering is slow enough that the order can be cancelled while it runs. Claim the
+     * receipt conditionally: if the order has left PROCESSING, nothing downstream will ever
+     * read this file, so discard it here rather than leaving it orphaned on disk.
+     */
+    const claimed = await OrdersDatabase.updateIfStatus(order.orderId, OrderStatus.PROCESSING, { receiptFilePath: filePath });
+    if (!claimed) {
+      await fs.unlink(filePath).catch((error: any) => {
+        if (error.code !== "ENOENT") throw error;
+      });
+      this.logger.warn(`Order ${orderId} left PROCESSING while rendering, receipt discarded`);
+      return;
+    }
+
     await SimpleQueueService.sendMessage(SQS_ORDER_EMAIL_QUEUE_NAME, "Email the customer", { orderId });
   }
 }

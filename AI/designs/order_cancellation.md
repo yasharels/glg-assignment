@@ -69,6 +69,11 @@ Cancellation splits cleanly into a **synchronous state transition** (the API's j
              +--> existing `status !== PROCESSING` guard fires
              +--> worker logs a warning and returns
              +--> message is deleted, not retried into the DLQ
+
+  and if order-processor was already mid-render when the cancel landed:
+
+             +--> its conditional claim on receiptFilePath is rejected
+             +--> it unlinks the PDF it just wrote, and does not enqueue an email
 ```
 
 **The flow in words:**
@@ -120,7 +125,7 @@ The alternative is a "thin" endpoint that enqueues and lets the worker do the tr
 | --- | --- |
 | **Cancelled before intake ran** — `order.details` is undefined, so there is no customer email address. | The worker logs a warning and completes without sending. The cancellation itself still succeeded and the status is correct. *This is a data-model problem, not a cancellation problem:* customer contact info is randomly generated at intake instead of being supplied by the client, so it genuinely does not exist yet. Documented as a known limitation rather than papered over. |
 | **Two concurrent `DELETE`s.** | Both reach the write; the `ConditionExpression` lets exactly one succeed. The loser gets `null` back, so it returns `409` and — critically — never enqueues. Exactly one message, therefore exactly one email. |
-| **Processor writes the receipt PDF just after cancellation lands.** | The emailer then sees `status == cancelled` and bails, so no receipt email goes out — but the PDF is orphaned in `/otmp/receipts`. The cancellation worker unlinks `order.receiptFilePath` if it is set, tolerating `ENOENT` so it stays idempotent on redelivery. |
+| **Processor is mid-render when the cancellation lands.** | The emailer sees `status == cancelled` and bails, so no receipt email goes out — but the PDF must not be left behind. This needs a guard on *both* sides, which the first cut of this design got wrong (it only covered one ordering, and end-to-end testing caught the leak). **Cancellation worker:** unlinks `order.receiptFilePath` if it finds one set, tolerating `ENOENT` so redelivery stays idempotent. **Processor:** *claims* its output via `OrdersDatabase.updateIfStatus(..., PROCESSING, ...)` and unlinks the file it just wrote if that condition is rejected. Together these close every interleaving: a successful claim can only have happened before the cancellation, so the worker — which always runs after it — is guaranteed to see the path and clean it up. |
 | **SQS send fails after the status was already flipped.** | The order is correctly `cancelled` but no email goes out. The API surfaces the `500` through the existing `handleError`. Accepted for this exercise; the production answer is a transactional outbox, or a sweeper over `cancelled` orders with no `cancellationEmailSentAt`. Noted rather than built. |
 | **Message redelivered after the email was already sent** (at-least-once delivery). | Duplicate email. This is the same trade-off the existing receipt emailer already makes — it is not worth diverging from the codebase's established semantics here. |
 | **Email send genuinely fails.** | The worker throws, the message is not deleted, SQS redelivers up to `maxReceiveCount = 3`, then it lands in the DLQ. Same as every other stage. |
@@ -165,7 +170,7 @@ Each step is independently reviewable and leaves the tree in a coherent state.
 - [✓] **Step 8 — Fix `getOrderStatus`.**
       Replace the `forEach`-with-`return` with a real lookup so `GET /api/orders?status=cancelled` actually filters. Small, but it is how cancellation gets verified through the API.
 
-- [ ] **Step 9 — Verify end to end.**
+- [✓] **Step 9 — Verify end to end.**
       Rebuild (the new queue has to exist in ElasticMQ), then: create an order and cancel it immediately, before intake — expect no email, a logged warning, and status `cancelled`; create one, let it get details, then cancel — expect a cancellation email in Mailhog and *no* receipt email; cancel a completed order — expect `409`; cancel twice — expect `409` and exactly one email; cancel a nonexistent id — expect `404`. Confirm nothing piles up in the DLQ.
 
 - [ ] **Step 10 — Document.**
