@@ -43,12 +43,14 @@ export class OrdersDatabase {
     /* Build filter expression */
     const filterExpression: Array<string> = [];
     const expressionAttributeValues = {};
+    const expressionAttributeNames = {};
 
     const filters = ['userId', 'status', 'referenceId'];
     for (const filter of filters) {
       if (params[filter]) {
         filterExpression.push(`#${filter} = :${filter}`);
         expressionAttributeValues[`:${filter}`] = { S: params[filter] };
+        expressionAttributeNames[`#${filter}`] = filter;
       }
     }
 
@@ -56,6 +58,7 @@ export class OrdersDatabase {
       TableName: DYNAMO_TABLE_ORDERS,
       Limit: count,
       FilterExpression: filterExpression.length > 0 ? filterExpression.join(" AND ") : undefined,
+      ExpressionAttributeNames: filterExpression.length > 0 ? expressionAttributeNames : undefined,
       ExpressionAttributeValues: filterExpression.length > 0 ? expressionAttributeValues : undefined,
       Select: "ALL_ATTRIBUTES"
     });

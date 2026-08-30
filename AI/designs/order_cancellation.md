@@ -162,7 +162,7 @@ Each step is independently reviewable and leaves the tree in a coherent state.
 - [✓] **Step 7 — Rework the endpoint.**
       Replace `deleteOrder` with `cancelOrder` in `OrdersController`: read → `404` if absent; conditional update → on rejection, re-read and return `409` with the current status; on success, enqueue → `200` with the updated order. No status check in the controller — the `ConditionExpression` is the single authority (see §3). Move the route to `DELETE /:orderId` in `OrdersRouter`, update the Swagger block to match, and drop the now-unused `OrdersDatabase.deleteOrder`.
 
-- [ ] **Step 8 — Fix `getOrderStatus`.**
+- [✓] **Step 8 — Fix `getOrderStatus`.**
       Replace the `forEach`-with-`return` with a real lookup so `GET /api/orders?status=cancelled` actually filters. Small, but it is how cancellation gets verified through the API.
 
 - [ ] **Step 9 — Verify end to end.**

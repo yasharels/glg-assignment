@@ -6,9 +6,5 @@ export enum OrderStatus {
 }
 
 export const getOrderStatus = (status: string): OrderStatus | undefined => {
-  Object.values(OrderStatus).forEach((orderStatus) => {
-    if (orderStatus === status) return orderStatus;
-  });
-
-  return undefined;
+  return Object.values(OrderStatus).find((orderStatus) => orderStatus === status);
 }
