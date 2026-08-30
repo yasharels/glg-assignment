@@ -25,7 +25,7 @@ Before designing anything, the relevant facts I pulled out of the existing code:
 1. **Cancel means cancel, not erase.** A cancellation is a business event. The record must survive it, with an audit trail.
 2. **Stay inside the existing architecture.** The system is queue-based and decoupled by design; the cancellation email is exactly the kind of side effect that belongs on a queue, with the retry and DLQ behaviour that comes with it.
 3. **Exactly one cancellation email per order**, even under concurrent `DELETE` requests.
-4. **The caller gets a truthful, immediate answer** — "cancelled", "already completed", or "no such order" — without polling.
+4. **The caller gets a truthful, immediate answer** — "cancelled", "already cancelled", or "no such order" — without polling.
 5. **No new failure modes on the happy path.** Existing order processing must be untouched when nobody cancels anything.
 
 ---
@@ -44,10 +44,11 @@ Cancellation splits cleanly into a **synchronous state transition** (the API's j
              | yes
              v
   +-------------------------------+
-  |  conditional UpdateItem       |            409 ORDER_NOT_CANCELLABLE
-  |  processing -> cancelled      |-- failed ->  (re-read for current status:
-  |  + cancelledAt                |               already completed/cancelled,
-  +-------------------------------+               or lost a concurrent race)
+  |  conditional UpdateItem       |            409 ORDER_ALREADY_CANCELLED
+  |  any status -> cancelled      |-- failed ->  (already cancelled, or lost
+  |  (unless already cancelled)   |               a concurrent race)
+  |  + cancelledAt                |
+  +-------------------------------+
              | ok
              v
   +-------------------------------+
@@ -79,8 +80,8 @@ Cancellation splits cleanly into a **synchronous state transition** (the API's j
 **The flow in words:**
 
 1. The API reads the order, purely to separate "no such order" from "not cancellable". Missing → `404`.
-2. The API performs a **conditional** `UpdateItem` (`ConditionExpression: #status = :processing`) setting `status = cancelled` and `cancelledAt`. This condition is the *only* guard on cancellability — there is deliberately no second status check in the controller, because any decision made from a prior read is already stale by the time the write lands. Two simultaneous `DELETE`s both reach this write; exactly one wins.
-3. If the write is rejected, the order was either never cancellable or we lost the race. The API re-reads and returns `409` with the current status, so the caller knows *why*.
+2. The API performs a **conditional** `UpdateItem` (`ConditionExpression: #status <> :cancelled`) setting `status = cancelled` and `cancelledAt`. This condition is the *only* guard on cancellability — there is deliberately no second status check in the controller, because any decision made from a prior read is already stale by the time the write lands. Two simultaneous `DELETE`s both reach this write; exactly one wins.
+3. If the write is rejected, the order was already cancelled, so the API returns `409 ORDER_ALREADY_CANCELLED`. Because that is the only reason the condition can fail on an order that exists, no re-read is needed to explain it.
 4. **Only the request that won the write** enqueues a message onto a new `order-cancellation-queue`. That is what guarantees one email.
 5. `OrderCancellationInstance` consumes the message, sends a cancellation email, and unlinks the receipt PDF if the processor happened to write one before the cancellation landed.
 6. Any pipeline stage still holding a message for this order sees `status !== processing`, logs a warning, and drops the message. No extra code needed.
@@ -109,13 +110,21 @@ Sending directly from the controller would be fewer lines, but it would make the
 
 **Rejected because:** `OrderEmailerInstance`'s entire body assumes a `processing` order with a receipt file on disk. Adding a discriminator means every consumer branches on message type, and the two paths have opposite preconditions (`status == processing` vs `status == cancelled`). Separate queues keep each worker single-purpose, let cancellation emails retry and dead-letter independently of receipt emails, and cost only the same five wiring touch points every other stage already pays.
 
-### 4.5 Only `processing` orders are cancellable
+### 4.5 An order is cancellable from any state except already-cancelled
 
-`completed` orders have already had a receipt emailed — cancelling one is a refund, which is a different business process. `cancelled` is idempotent-by-rejection: the second `DELETE` gets a `409` rather than a second email. `error` orders are left non-cancellable too; they need operator triage, and quietly letting a customer cancel one would mask the underlying failure. This is a narrow, easily-widened rule, and returning the current status in the `409` body means a caller always knows which case they hit.
+**This reverses the first version of this design**, which allowed cancellation only from `processing` on the reasoning that cancelling a `completed` order is really a refund. That was wrong twice over.
+
+It reasoned about a system that does not exist — there is no payment subsystem here, so "refund" is imaginary. `completed` in this codebase means exactly one thing: *the receipt email was sent*. Cancelling an order after its confirmation email is entirely ordinary.
+
+And it made the endpoint almost unusable. An order goes `processing` → `completed` in about **3.5 seconds**, so a `processing`-only rule turns every cancellation into a race against the pipeline. Anyone exercising this endpoint would create an order, watch it complete the way the earlier tasks teach, try to cancel it, and get a `409`. During verification I hit exactly that, wrote it off as "correct, I waited too long," and rewrote my own test to poll-and-pounce so it could land inside the window. A test that has to race the system to reach the happy path is evidence the rule is wrong, not that the test is slow.
+
+So the condition is `#status <> :cancelled`. `cancelled` is rejected for idempotency — the second `DELETE` gets a `409 ORDER_ALREADY_CANCELLED` rather than a second email — and everything else is permitted. That makes the `409` mean one unambiguous thing, which is why the controller no longer re-reads to explain it.
+
+`error` is therefore cancellable too. That is moot today: **nothing in either package ever writes `OrderStatus.ERROR`** — there are only two status writes in the whole codebase (`OrderEmailerInstance` setting `COMPLETED`, and `cancelOrder`), and `DeadLetterInstance`, the obvious place it would be set, has an empty body. If it ever becomes reachable, cancelling would overwrite the failure signal, which is an argument for the dead-letter handler recording failures in the `dead-letters` table the schema already provisions — not for narrowing cancellation again.
 
 ### 4.6 The API sets the status; the worker only notifies
 
-The alternative is a "thin" endpoint that enqueues and lets the worker do the transition. Rejected: the caller would get a `200` for an order that turns out to be already completed, and the window between the request and the worker running is a window in which the pipeline is still merrily generating a receipt. Transitioning synchronously stops the pipeline at the moment of the request and lets the response tell the truth.
+The alternative is a "thin" endpoint that enqueues and lets the worker do the transition. Rejected: the caller would get a `200` for an order that turns out to have been cancelled already, duplicate requests could not be collapsed before the email is sent, and the window between the request and the worker running is a window in which the pipeline is still merrily generating a receipt. Transitioning synchronously stops the pipeline at the moment of the request and lets the response tell the truth.
 
 ---
 
@@ -135,7 +144,7 @@ The alternative is a "thin" endpoint that enqueues and lets the worker do the tr
 ## 6. Explicitly out of scope
 
 - Refunds, payment reversal, or inventory restocking — no such subsystem exists here.
-- Making `error`-status orders cancellable (see §4.5).
+- Making `OrderStatus.ERROR` reachable at all, or giving `DeadLetterInstance` a body (see §4.5).
 - The `amount` vs. line-item inconsistency — already covered in `NOTES.md` under task 3.
 - Making `DeadLetterInstance` actually do something. It is an empty stub today; fixing it is a separate task.
 - Fixing `getOrderByReferenceId`, which sends an `@aws-sdk/lib-dynamodb` command through a raw `DynamoDBClient` and therefore returns unmarshalled attribute maps. Pre-existing and untouched by this work.
@@ -165,7 +174,7 @@ Each step is independently reviewable and leaves the tree in a coherent state.
       `cancelOrder(orderId)` issuing an `UpdateItemCommand` with `ConditionExpression: "#status = :processing"`, setting `status`, `cancelledAt`, and `updatedAt`, returning the updated order and signalling a condition failure to the caller.
 
 - [✓] **Step 7 — Rework the endpoint.**
-      Replace `deleteOrder` with `cancelOrder` in `OrdersController`: read → `404` if absent; conditional update → on rejection, re-read and return `409` with the current status; on success, enqueue → `200` with the updated order. No status check in the controller — the `ConditionExpression` is the single authority (see §3). Move the route to `DELETE /:orderId` in `OrdersRouter`, update the Swagger block to match, and drop the now-unused `OrdersDatabase.deleteOrder`.
+      Replace `deleteOrder` with `cancelOrder` in `OrdersController`: read → `404` if absent; conditional update → `409 ORDER_ALREADY_CANCELLED` on rejection; on success, enqueue → `200` with the updated order. No status check in the controller — the `ConditionExpression` is the single authority (see §3). Move the route to `DELETE /:orderId` in `OrdersRouter`, update the Swagger block to match, and drop the now-unused `OrdersDatabase.deleteOrder`.
 
 - [✓] **Step 8 — Fix `getOrderStatus`.**
       Replace the `forEach`-with-`return` with a real lookup so `GET /api/orders?status=cancelled` actually filters. Small, but it is how cancellation gets verified through the API.

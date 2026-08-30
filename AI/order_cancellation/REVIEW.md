@@ -50,9 +50,10 @@ Scenarios exercised end to end:
 | Cancel after details, before receipt | 200; cancellation email in Mailhog; no receipt email |
 | Cancel after receipt written | 200; `receipt discarded`; file gone from disk |
 | Cancel before intake ran | 200; no email; `has no details, skipping` |
-| Double cancel | 409 `status=cancelled`; exactly one email total |
+| Double cancel | 409 `ORDER_ALREADY_CANCELLED`; exactly one email total |
 | Nonexistent order | 404 `ORDER_NOT_FOUND` |
-| Already-completed order | 409 `status=completed` |
+| **Cancel an already-completed order** | 200; cancellation email sent; order carries both `completedAt` and `cancelledAt` |
+| 6 concurrent `DELETE`s on a completed order | 1× 200, 5× 409; exactly one cancellation email |
 | All five queues + DLQ | 0 messages; nothing dead-lettered |
 | Uncancelled happy path | completes; receipt email with PDF attached; receipts dir empty |
 | `?status=cancelled`, `?userId=` | filters correctly (both were broken before) |
@@ -65,9 +66,11 @@ Scenarios exercised end to end:
   strategies I never landed inside the window. That branch is covered by calling `updateIfStatus`
   directly against a cancelled order — proving the `false` return and the rejected write — plus
   the type checker. It is *not* covered by an observed end-to-end run.
-- **Concurrency is argued, not demonstrated.** I never fired two simultaneous `DELETE`s. The
-  single-email guarantee rests on DynamoDB's conditional-write semantics and on the fact that the
-  enqueue sits behind the winning write, both of which I verified in isolation.
+- ~~Concurrency is argued, not demonstrated.~~ **Now demonstrated.** Six concurrent `DELETE`s
+  against one order return `1× 200, 5× 409`, and Mailhog shows exactly one cancellation email.
+  The counterfactual was measured too: the same six requests against a read-then-check-then-write
+  implementation with no `ConditionExpression` produce **six** winners, i.e. six emails to the
+  customer. That is the clearest statement of what the conditional write is for.
 - **No from-scratch rebuild.** The queue, containers, and env were brought up incrementally. A
   clean `setup.sh` + `run.sh` on an empty machine has not been exercised.
 
@@ -92,7 +95,27 @@ worker always runs after it.
 The lesson is not the bug — it is that the design reasoned about one interleaving and stopped.
 End-to-end testing, not review, is what caught it.
 
-### 3.2 I recommended removing the controller's status pre-check on incomplete analysis
+### 3.2 The cancellability rule was far too narrow, and I had the evidence in front of me
+
+The first version allowed cancellation only from `processing`, on the reasoning that cancelling a
+`completed` order is a refund. Two problems. It reasoned about a payment subsystem that does not
+exist — `completed` here means only that the receipt email was sent. And an order reaches
+`completed` in about **3.5 seconds**, so the rule turned every cancellation into a race against
+the pipeline: the natural way to exercise the endpoint — create an order, watch it finish, cancel
+it — returned `409`.
+
+What makes this the worst miss of the exercise is that I *observed* it and explained it away.
+During step 9 a cancel returned `409` instead of `200`; I checked the timestamps, found a 3.5s
+`createdAt` → `completedAt`, concluded "correct, I waited too long," and rewrote my own test to
+poll-and-pounce so it would land inside the window. Writing a test that has to win a race to reach
+the happy path is evidence about the design, not about the test. It took a reviewer asking
+"shouldn't we be able to cancel a completed order?" to surface it.
+
+The condition is now `#status <> :cancelled`. A pleasant side effect: the `409` has exactly one
+meaning, so the re-read added in §3.3's discussion became dead weight and came out — the failure
+path dropped from three round trips to two.
+
+### 3.3 I recommended removing the controller's status pre-check on incomplete analysis
 
 The pre-check was genuinely redundant for correctness, and removing it left one authority for
 cancellability. But I presented that as costless, and it was not: the common 409 path went from
@@ -103,7 +126,7 @@ on failure — is cheaper on the happy path and never got raised until late.
 The current shape is defensible on readability grounds. The efficiency case I made for it was the
 weakest of the three options, and I made it twice.
 
-### 3.3 The first cut of the race fix widened a shared method
+### 3.4 The first cut of the race fix widened a shared method
 
 I implemented the conditional write as an optional third argument to `OrdersDatabase.update`,
 changing its signature and return type for the benefit of one of three callers, and leaving it
@@ -112,14 +135,14 @@ named `updateIfStatus` was correct: `update()` is now byte-identical to `main`, 
 variant's name announces at the call site that a decision is being made, and shared private
 helpers keep the expression-building in one place.
 
-### 3.4 My own checklist had an ordering flaw
+### 3.5 My own checklist had an ordering flaw
 
 Step 3 wired `OrderCancellationInstance` into the registry two steps before step 5 created the
 class, which would have left the pipeline uncompilable between reviews. I deferred that one line
 to step 5. Minor, but the checklist claimed each step "leaves the tree in a coherent state" and
 one of them did not.
 
-### 3.5 Step 8 needed a fix the design did not anticipate
+### 3.6 Step 8 needed a fix the design did not anticipate
 
 Fixing `getOrderStatus` in isolation would have been a **regression**: `getOrders` builds
 `#status` placeholders into its `FilterExpression` but never populated `ExpressionAttributeNames`,
@@ -142,8 +165,10 @@ Carried into `NOTES.md` as well, since that is the file the exercise asks for.
   `cancelled` orders with no cancellation email recorded. Neither is built.
 - **At-least-once delivery can duplicate the email** on redelivery. The existing receipt emailer
   makes the same trade-off; diverging only here seemed worse than matching the codebase.
-- **Only `processing` orders are cancellable.** `completed` is a refund — a different business
-  process. `error` needs operator triage. Both return 409 with the current status.
+- **Cancelling an `error` order would overwrite the failure signal.** Permitted by the
+  `<> :cancelled` rule, but moot today: nothing ever writes `OrderStatus.ERROR`. The real fix is
+  for `DeadLetterInstance` to record failures in the `dead-letters` table the schema already
+  provisions, rather than keeping that signal in a field a user action can overwrite.
 - **`?status=bogus` returns everything rather than 400.** Unknown values map to `undefined` and
   drop the filter. Unchanged from the original behaviour; tightening it is an API-contract
   decision beyond this task.
@@ -160,7 +185,7 @@ In rough priority order:
    convert every table in §2 from prose into something that runs. The processor's discard branch
    in particular needs a seam — an injectable delay or a directly-driven worker — because it
    cannot be triggered from outside.
-2. **A concurrency test** that actually fires simultaneous `DELETE`s and asserts one email.
+2. **Automate the concurrency check** — it has now been run by hand (§2) but nothing re-runs it.
 3. **Outbox or sweeper** for the enqueue-after-commit gap in §4.
 4. **Client-supplied customer details**, which closes the "no address before intake" hole and the
    task-3 `amount` inconsistency in one change.

@@ -206,7 +206,7 @@ export class OrdersController extends Controller {
     * /api/orders/{orderId}:
     *    delete:
     *      tags: [Orders]
-    *      summary: Cancel an order and email the customer a cancellation notice.
+    *      summary: Cancel an order and email the customer a cancellation notice. Works from any state except already-cancelled.
     *      parameters:
     *        - in: path
     *          name: orderId
@@ -222,7 +222,7 @@ export class OrdersController extends Controller {
     *        "404":
     *          description: ORDER NOT FOUND
     *        "409":
-    *          description: ORDER NOT CANCELLABLE
+    *          description: ORDER ALREADY CANCELLED
     *        "500":
     *          description: ERROR
     */
@@ -240,9 +240,7 @@ export class OrdersController extends Controller {
          cancellations to a single email, since only the winner gets the order back. */
       const order = await OrdersDatabase.cancelOrder(orderId);
       if (!order) {
-        /* Not cancellable, or we lost a race - re-read for the current truth */
-        const current = await OrdersDatabase.getOrderById(orderId);
-        res.status(409).json({ success: false, message: "ORDER_NOT_CANCELLABLE", status: current?.status });
+        res.status(409).json({ success: false, message: "ORDER_ALREADY_CANCELLED" });
         return;
       }
 

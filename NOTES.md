@@ -92,11 +92,15 @@
    - Delivery is at-least-once, so a redelivered message can produce a duplicate cancellation
      email. The existing receipt emailer makes exactly the same trade-off, and diverging from
      that here did not seem worth it.
-   - Only `processing` orders are cancellable. `completed` ones have already had a receipt
-     emailed, so cancelling one is really a refund - a different business process. `error`
-     orders need operator triage, and silently letting a customer cancel one would mask the
-     underlying failure. Both return a 409 carrying the current status, so a caller always
-     knows which case they hit.
+   - An order stays cancellable after it completes. `completed` here only means the receipt
+     email went out, and the pipeline gets there in about 3.5 seconds, so restricting
+     cancellation to `processing` orders would make the endpoint a race nobody can win - my
+     first cut did exactly that, and I only noticed because my own tests kept losing the race.
+     The condition is `#status <> :cancelled`, so the single 409 means "already cancelled" and
+     nothing else. Note this also permits cancelling an `error` order, which is moot today:
+     nothing in either package ever writes `OrderStatus.ERROR` - the only two status writes in
+     the codebase are the emailer setting `COMPLETED` and `cancelOrder` - and
+     `DeadLetterInstance`, where it would naturally be set, has an empty body.
    - There is no test framework in this repo, so everything above was verified by hand against
      the running stack: curl for the API, Mailhog's HTTP API for the emails, worker logs for
      the branch decisions, and the SQS query API for queue and dead-letter depths. The one

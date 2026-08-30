@@ -104,13 +104,15 @@ export class OrdersDatabase {
   }
 
   /**
-   * Atomically move an order out of PROCESSING and into CANCELLED.
+   * Atomically move an order into CANCELLED from any other state.
    *
-   * The condition is what makes cancellation safe under concurrent requests: callers check
-   * the status with a read first, but only the request that wins this write gets the order
-   * back. Everyone else gets null and must not enqueue a cancellation email.
+   * An order stays cancellable after it completes - "completed" here only means the receipt
+   * was emailed, and the pipeline finishes in a few seconds, so a processing-only rule would
+   * make the endpoint a race nobody can win.
    *
-   * Returns null when the condition fails, which also covers an order that no longer exists.
+   * The condition is what makes cancellation safe under concurrent requests: only the request
+   * that wins this write gets the order back. Everyone else gets null and must not enqueue a
+   * cancellation email. Null also covers an order that no longer exists.
    */
   public static async cancelOrder(orderId: string): Promise<Order | null> {
     const client = DynamoService.getClient();
@@ -122,11 +124,10 @@ export class OrdersDatabase {
       TableName: DYNAMO_TABLE_ORDERS,
       Key: { orderId: { S: orderId } },
       UpdateExpression: "set #status = :cancelled, cancelledAt = :now, updatedAt = :now",
-      ConditionExpression: "#status = :processing",
+      ConditionExpression: "#status <> :cancelled",
       ExpressionAttributeNames: { "#status": "status" },
       ExpressionAttributeValues: {
         ":cancelled": { S: OrderStatus.CANCELLED },
-        ":processing": { S: OrderStatus.PROCESSING },
         ":now": { N: `${now}` },
       },
       ReturnValues: "ALL_NEW",
