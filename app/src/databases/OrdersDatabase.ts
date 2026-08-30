@@ -1,6 +1,5 @@
 import {
   ConditionalCheckFailedException,
-  DeleteItemCommand,
   GetItemCommand,
   PutItemCommand,
   ScanCommand,
@@ -139,17 +138,5 @@ export class OrdersDatabase {
       if (error instanceof ConditionalCheckFailedException) return null;
       throw error;
     }
-  }
-
-  public static async deleteOrder(orderId: string): Promise<void> {
-    const client = DynamoService.getClient();
-    if (!DYNAMO_TABLE_ORDERS) throw new Error("DYNAMO_TABLE_ORDERS is not defined");
-
-    const command = new DeleteItemCommand({
-      TableName: DYNAMO_TABLE_ORDERS,
-      Key: { orderId: { S: orderId } },
-    });
-
-    await client.send(command);
   }
 }

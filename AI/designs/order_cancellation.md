@@ -43,16 +43,11 @@ Cancellation splits cleanly into a **synchronous state transition** (the API's j
   +----------------------+
              | yes
              v
-  +----------------------+
-  |  status == processing?|-- no ------------>  409 ORDER_NOT_CANCELLABLE
-  +----------------------+                      (body carries current status)
-             | yes                                        ^
-             v                                            |
-  +-------------------------------+                       |
-  |  conditional UpdateItem       |-- condition failed ----+
-  |  processing -> cancelled      |   (lost a concurrent race)
-  |  + cancelledAt                |
   +-------------------------------+
+  |  conditional UpdateItem       |            409 ORDER_NOT_CANCELLABLE
+  |  processing -> cancelled      |-- failed ->  (re-read for current status:
+  |  + cancelledAt                |               already completed/cancelled,
+  +-------------------------------+               or lost a concurrent race)
              | ok
              v
   +-------------------------------+
@@ -78,9 +73,9 @@ Cancellation splits cleanly into a **synchronous state transition** (the API's j
 
 **The flow in words:**
 
-1. The API reads the order. Missing → `404`.
-2. If the status is anything other than `processing`, the order isn't cancellable → `409` with the current status, so the caller knows *why*.
-3. The API performs a **conditional** `UpdateItem` (`ConditionExpression: #status = :processing`) setting `status = cancelled` and `cancelledAt`. The condition is what makes step 2's check safe under concurrency — two simultaneous `DELETE`s both pass the read, but only one wins the write.
+1. The API reads the order, purely to separate "no such order" from "not cancellable". Missing → `404`.
+2. The API performs a **conditional** `UpdateItem` (`ConditionExpression: #status = :processing`) setting `status = cancelled` and `cancelledAt`. This condition is the *only* guard on cancellability — there is deliberately no second status check in the controller, because any decision made from a prior read is already stale by the time the write lands. Two simultaneous `DELETE`s both reach this write; exactly one wins.
+3. If the write is rejected, the order was either never cancellable or we lost the race. The API re-reads and returns `409` with the current status, so the caller knows *why*.
 4. **Only the request that won the write** enqueues a message onto a new `order-cancellation-queue`. That is what guarantees one email.
 5. `OrderCancellationInstance` consumes the message, sends a cancellation email, and unlinks the receipt PDF if the processor happened to write one before the cancellation landed.
 6. Any pipeline stage still holding a message for this order sees `status !== processing`, logs a warning, and drops the message. No extra code needed.
@@ -124,7 +119,7 @@ The alternative is a "thin" endpoint that enqueues and lets the worker do the tr
 | Case | Handling |
 | --- | --- |
 | **Cancelled before intake ran** — `order.details` is undefined, so there is no customer email address. | The worker logs a warning and completes without sending. The cancellation itself still succeeded and the status is correct. *This is a data-model problem, not a cancellation problem:* customer contact info is randomly generated at intake instead of being supplied by the client, so it genuinely does not exist yet. Documented as a known limitation rather than papered over. |
-| **Two concurrent `DELETE`s.** | Both pass the read check; the `ConditionExpression` lets exactly one write succeed. The loser gets `409`. Exactly one message is enqueued, so exactly one email is sent. |
+| **Two concurrent `DELETE`s.** | Both reach the write; the `ConditionExpression` lets exactly one succeed. The loser gets `null` back, so it returns `409` and — critically — never enqueues. Exactly one message, therefore exactly one email. |
 | **Processor writes the receipt PDF just after cancellation lands.** | The emailer then sees `status == cancelled` and bails, so no receipt email goes out — but the PDF is orphaned in `/otmp/receipts`. The cancellation worker unlinks `order.receiptFilePath` if it is set, tolerating `ENOENT` so it stays idempotent on redelivery. |
 | **SQS send fails after the status was already flipped.** | The order is correctly `cancelled` but no email goes out. The API surfaces the `500` through the existing `handleError`. Accepted for this exercise; the production answer is a transactional outbox, or a sweeper over `cancelled` orders with no `cancellationEmailSentAt`. Noted rather than built. |
 | **Message redelivered after the email was already sent** (at-least-once delivery). | Duplicate email. This is the same trade-off the existing receipt emailer already makes — it is not worth diverging from the codebase's established semantics here. |
@@ -164,8 +159,8 @@ Each step is independently reviewable and leaves the tree in a coherent state.
 - [✓] **Step 6 — Add the conditional cancel to the app's `OrdersDatabase`.**
       `cancelOrder(orderId)` issuing an `UpdateItemCommand` with `ConditionExpression: "#status = :processing"`, setting `status`, `cancelledAt`, and `updatedAt`, returning the updated order and signalling a condition failure to the caller.
 
-- [ ] **Step 7 — Rework the endpoint.**
-      Replace `deleteOrder` with `cancelOrder` in `OrdersController`: read → `404`; status check → `409` with the current status; conditional update → `409` on a lost race; enqueue → `200` with the updated order. Move the route to `DELETE /:orderId` in `OrdersRouter`, update the Swagger block to match, and drop the now-unused `OrdersDatabase.deleteOrder`.
+- [✓] **Step 7 — Rework the endpoint.**
+      Replace `deleteOrder` with `cancelOrder` in `OrdersController`: read → `404` if absent; conditional update → on rejection, re-read and return `409` with the current status; on success, enqueue → `200` with the updated order. No status check in the controller — the `ConditionExpression` is the single authority (see §3). Move the route to `DELETE /:orderId` in `OrdersRouter`, update the Swagger block to match, and drop the now-unused `OrdersDatabase.deleteOrder`.
 
 - [ ] **Step 8 — Fix `getOrderStatus`.**
       Replace the `forEach`-with-`return` with a real lookup so `GET /api/orders?status=cancelled` actually filters. Small, but it is how cancellation gets verified through the API.

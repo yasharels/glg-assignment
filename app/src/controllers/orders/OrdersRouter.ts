@@ -13,7 +13,7 @@ export class OrdersRouter extends ControllerRouter<OrdersController> {
     this.router.get("/:orderId", this.controller.getOrderById.bind(this.controller));
     this.router.get("/reference/:referenceId", this.controller.getOrderByReferenceId.bind(this.controller));
     this.router.post("/", this.controller.createOrder.bind(this.controller));
-    this.router.delete("/", this.controller.deleteOrder.bind(this.controller));
+    this.router.delete("/:orderId", this.controller.cancelOrder.bind(this.controller));
     return this.router;
   }
 }
