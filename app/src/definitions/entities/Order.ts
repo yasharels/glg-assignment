@@ -14,6 +14,7 @@ export interface Order {
   receiptFilePath?: string;
   details?: OrderDetails;
   completedAt?: number;
+  cancelledAt?: number;
 }
 
 export class OrderFactory {
