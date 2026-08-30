@@ -149,7 +149,7 @@ Each step is independently reviewable and leaves the tree in a coherent state.
 - [✓] **Step 1 — Align the status enum and order entity.**
       Add `CANCELLED` to `pipeline/src/definitions/enums/OrderStatus.ts` so it matches the app's copy, and add an optional `cancelledAt` field to the `Order` interface in **both** `app/` and `pipeline/`, alongside the existing `completedAt`.
 
-- [ ] **Step 2 — Provision the cancellation queue.**
+- [✓] **Step 2 — Provision the cancellation queue.**
       Add `order-cancellation-queue` to `elasticmq.conf`, mirroring the other queues including the `deadLettersQueue` block, and add `SQS_ORDER_CANCELLATION_QUEUE_NAME` to `etc/dev.env`.
 
 - [ ] **Step 3 — Register the new instance type.**
