@@ -1,8 +1,10 @@
 import {
+  ConditionalCheckFailedException,
   DeleteItemCommand,
   GetItemCommand,
   PutItemCommand,
   ScanCommand,
+  UpdateItemCommand,
 } from "@aws-sdk/client-dynamodb";
 import { unmarshall, marshall } from "@aws-sdk/util-dynamodb";
 
@@ -97,6 +99,46 @@ export class OrdersDatabase {
     const response = await client.send(command);
     if (!response.Items || response.Items.length === 0) return null;
     return response.Items[0] as Order;
+  }
+
+  /**
+   * Atomically move an order out of PROCESSING and into CANCELLED.
+   *
+   * The condition is what makes cancellation safe under concurrent requests: callers check
+   * the status with a read first, but only the request that wins this write gets the order
+   * back. Everyone else gets null and must not enqueue a cancellation email.
+   *
+   * Returns null when the condition fails, which also covers an order that no longer exists.
+   */
+  public static async cancelOrder(orderId: string): Promise<Order | null> {
+    const client = DynamoService.getClient();
+    if (!DYNAMO_TABLE_ORDERS) throw new Error("DYNAMO_TABLE_ORDERS is not defined");
+
+    const now = Date.now();
+
+    const command = new UpdateItemCommand({
+      TableName: DYNAMO_TABLE_ORDERS,
+      Key: { orderId: { S: orderId } },
+      UpdateExpression: "set #status = :cancelled, cancelledAt = :now, updatedAt = :now",
+      ConditionExpression: "#status = :processing",
+      ExpressionAttributeNames: { "#status": "status" },
+      ExpressionAttributeValues: {
+        ":cancelled": { S: OrderStatus.CANCELLED },
+        ":processing": { S: OrderStatus.PROCESSING },
+        ":now": { N: `${now}` },
+      },
+      ReturnValues: "ALL_NEW",
+    });
+
+    try {
+      const response = await client.send(command);
+      if (!response.Attributes) return null;
+      return unmarshall(response.Attributes) as Order;
+    }
+    catch (error: any) {
+      if (error instanceof ConditionalCheckFailedException) return null;
+      throw error;
+    }
   }
 
   public static async deleteOrder(orderId: string): Promise<void> {

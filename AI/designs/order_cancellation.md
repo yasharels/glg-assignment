@@ -161,7 +161,7 @@ Each step is independently reviewable and leaves the tree in a coherent state.
 - [✓] **Step 5 — Write `OrderCancellationInstance`.**
       Consumes `{ orderId }`; guards on `status === CANCELLED` (the mirror image of the other workers' guard, so a stale or redelivered message is a safe no-op); skips with a warning when `details` is absent; sends the email; unlinks `receiptFilePath` if present, tolerating `ENOENT`.
 
-- [ ] **Step 6 — Add the conditional cancel to the app's `OrdersDatabase`.**
+- [✓] **Step 6 — Add the conditional cancel to the app's `OrdersDatabase`.**
       `cancelOrder(orderId)` issuing an `UpdateItemCommand` with `ConditionExpression: "#status = :processing"`, setting `status`, `cancelledAt`, and `updatedAt`, returning the updated order and signalling a condition failure to the caller.
 
 - [ ] **Step 7 — Rework the endpoint.**
