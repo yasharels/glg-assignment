@@ -73,7 +73,6 @@ export const ReceiptDocument: React.FC<{ order: Order }> = ({ order }) => {
         <View style={styles.orderInfo}>
           <Text>Order ID: {order.orderId}</Text>
           <Text>Date: {new Date(order.createdAt).toLocaleDateString()}</Text>
-          <Text>Status: {order.status}</Text>
         </View>
 
         {/* Customer Information */}
