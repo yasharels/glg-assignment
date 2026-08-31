@@ -12,7 +12,8 @@
    in the API request. The actual items, of course, are server-side randomly generated fake data.
    Task 3 asked to fix the PDF render, which could be done straightforwardly by summing up
    `item.price * item.quantity` over the order's items. Also renamed "Price" to "Unit Price"
-   in the PDF to be less ambiguous.
+   in the PDF to be less ambiguous, and removed the "status" field from the PDF entirely
+   since it's not something the user should see and was inaccurate anyway.
 
    Caveat:
    - This fixes the PDF render, but leaves the data in Dynamo inconsistent with the client's
